@@ -1,5 +1,16 @@
 ## **Towards Transformer-Based Aligned Generation with Self-Coherence Guidance**
 
+## Setup
+
+### Environment
+To set up their environment, please run:
+```
+conda env create -f environment.yaml
+conda activate conform
+```
+
+
+
 <!--
 **SCG-diffusion/scg-diffusion** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
 
