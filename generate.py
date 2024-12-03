@@ -50,7 +50,6 @@ def get_token_indices_for_all_words(prompt, max_length=120):
 seed_list=[1]
 prompts=["a pixar-style girl and a watercolor countryside"]
 for prompt in prompts:
-    # ratio=(0.35*item["0"],0.35*item["1"])
     ratio = (0,0)
     token_indices_dict = get_token_indices_for_all_words(prompt)
     token_indices = (token_indices_dict[2],token_indices_dict[6])
