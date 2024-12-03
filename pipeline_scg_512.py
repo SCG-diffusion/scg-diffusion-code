@@ -1053,174 +1053,8 @@ class PixArtAlphaPipeline(DiffusionPipeline):
         latents = latents - step_size * grad_cond
         return latents
     
-    def _compute_attention_loss(
-            self,
-            indices_to_alter: List[int],
-            attention_res: int = 16,
-            smooth_attentions: bool = True,
-            loss_mode: str = 'max',
-            return_max_attn: bool = False,
-    ) -> dict:
-        """ Aggregates the attention for each token and computes the max activation value for each token to alter. """
-
-       
-        attention_maps = self._aggregate_attention()
-
-        if loss_mode in ['tv_bind']:
-            color_attention_maps = self._aggregate_attention()
-        else:
-            color_attention_maps = None
-
-        return_dict = self._compute_loss_geiven_attn_map(
-            attention_maps=attention_maps,
-            indices_to_alter=indices_to_alter,
-            smooth_attentions=smooth_attentions,
-            loss_mode=loss_mode,
-            return_max_attn=return_max_attn,
-            color_attention_maps=color_attention_maps,
-        )
-        return return_dict
     
-    def _compute_loss_geiven_attn_map(
-            self,
-            attention_maps: torch.Tensor,
-            indices_to_alter: List[int],
-            smooth_attentions: bool = True,
-            loss_mode: str = 'max',
-            return_max_attn: bool = False,
-            color_attention_maps: torch.Tensor = None
-    ) -> dict:
-        """ Computes the maximum attention value for each of the tokens we wish to alter. """
-
-        #### pixart使用T5 encoder,某个token的attention map会特别大，这里不需要归一化
-        attention_for_text = attention_maps[:, :, 1:-1]  # attention_maps[:, :, 1:13]#attention_maps[:, :, 1:-1]
-
-        if color_attention_maps is not None:
-            color_attention_maps_text = color_attention_maps[:, :, 1:-1]
-            # color_attention_maps_text *= 100
-            # color_attention_maps_text = torch.nn.functional.softmax(color_attention_maps_text, dim=-1)
-        else:
-            color_attention_maps_text = None
-        
-        # attention_for_text *= 100
-        # attention_for_text = torch.nn.functional.softmax(attention_for_text, dim=-1)
-
-        # Shift indices since we removed the first token
-        indices_to_alter = [index - 1 for index in indices_to_alter]
-
-        loss = torch.nn.L1Loss()
-
-        # Extract the maximum values
-        loss_list_per_token = []
-        max_attn_list = []
-        tv_loss_list = []
-        return_dict = {}
-        smoothing = GaussianSmoothing().to(attention_maps.device)
-
-        def _attn_smoothing(image):
-            input = F.pad(image.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode='reflect')
-            image = smoothing(input).squeeze(0).squeeze(0)  # (16,16)
-            return image
-
-        tv_loss = torch.tensor([0], device=attention_for_text.device)
-        for j, i in enumerate(indices_to_alter):
-            image = attention_for_text[:, :, i]
-            if smooth_attentions:
-                image = _attn_smoothing(image)
-
-            if return_max_attn:
-                max_attn = image.max()
-                max_attn_list.append(max_attn)
-
-            if loss_mode == 'max':
-                max_attn = image.max()
-                loss_values = max_attn
-            elif loss_mode == 'tv':
-                tv_loss = loss(image[:, :-1], image[:, 1:]) + loss(image[-1:, :], image[1:, :])
-                loss_values = tv_loss
-            elif loss_mode == 'tv_bind':
-                tv_loss = loss(image[:, :-1], image[:, 1:]) + loss(image[-1:, :], image[1:, :])
-                max_attn = image.max()
-                loss_values = tv_loss
-                
-                if self.color_index_list is not None and (self.color_index_list[j] - 1) >= 0:  # and self.cur_i >= 5
-                    color_index = self.color_index_list[j] - 1
-                    color_image = color_attention_maps_text[:, :, color_index]
-
-                    if smooth_attentions:
-                        color_image = _attn_smoothing(color_image)
-                    color_tv_loss = loss(color_image[:, :-1], color_image[:, 1:]) + loss(color_image[-1:, :],
-                                                                                         color_image[1:, :])
-                    
-                    image_ = image
-                    color_image_ = color_image
-                    color_image_ = color_image_ / color_image_.max() * image_.max()
-                    image_ = torch.nn.functional.softmax(image_.view(-1),dim=0)
-                    color_image_ = torch.nn.functional.softmax(color_image_.view(-1),dim=0)
-
-                    if tv_loss < 0.1:
-                        quantile = 0.3
-                    else:
-                        quantile = 0.2
-
-                    thresh_image = quantile * image_.max()
-                    thresh_color = quantile * image_.max()
-                    image_ = torch.nn.functional.relu(image_ - thresh_image) + 1e-5  # 0.2
-                    color_image_ = torch.nn.functional.relu(color_image_ - thresh_color) + 1e-5
-                    
-                    if loss_mode == 'tv_bind':
-                        coef = 1
-                        if self.cur_i >= 10 and self.cur_i < 20:
-                            coef =10  # 30
-                        elif self.cur_i >= 20:
-                            coef =30
-                    else:
-                        coef = 5  # 30
-                        if self.cur_i >= 10 and self.cur_i < 20:
-                            coef = 10  # 30
-                        elif self.cur_i >= 20:
-                            coef = 30
-                    # breakpoint()
-                    bind_loss = coef * jenson_shannon_divergence(image_, color_image_)
-
-                    # print('--> tv : ', tv_loss.item(), loss_values.item(),
-                    #       'bindloss: ', bind_loss.item(), 'color_tv: ', color_tv_loss.item())
-                    
-                    # loss_values = color_tv_loss + loss_values - bind_loss
-                    loss_values = loss_values
-                else:
-                    # print('--> losses : ', tv_loss.item(), max_attn.item(), loss_values.item())
-                    pass
-            elif loss_mode == 'tv_max':
-                tv_loss = loss(image[:, :-1], image[:, 1:]) + loss(image[-1:, :], image[1:, :])
-                max_attn = image.max()
-                loss_values = 1 * tv_loss + 0.3 * max_attn
-            else:
-                raise NotImplementedError
-
-            loss_list_per_token.append(loss_values)
-            tv_loss_list.append(tv_loss)
-
-        #############################################
-        #       Aggregate the losses (per token)    #
-        #############################################
-        losses = [0.0 - curr_max for curr_max in loss_list_per_token]  # maximize these terms #TODO: to change here!
-        losses = torch.stack(losses)
-        tv_loss_list = torch.stack(tv_loss_list)
-
-        # agg_loss = torch.max(losses)
-        agg_loss = torch.sum(losses)
-        return_dict['loss'] = agg_loss
-        del image
-        if return_max_attn:
-            max_attn_list = torch.stack(max_attn_list).cpu()
-            return_dict['max_attn'] = max_attn_list
-
-        if self.threshold_indicator == 'tv_loss':
-            return_dict['threshold'] = tv_loss_list.min()
-        elif self.threshold_indicator == 'max_attn':
-            return_dict['threshold'] = max_attn_list.min()
-        return return_dict
+    
     def _compute_max_attention_per_index(self,
                                          attention_maps: torch.Tensor,
                                          indices_to_alter: List[int],
@@ -1315,27 +1149,11 @@ class PixArtAlphaPipeline(DiffusionPipeline):
         use_resolution_binning: bool = True,
         max_sequence_length: int = 120,
         
-        max_iter_to_alter: int = 25,
-        refinement_steps: int = 20,
-        iterative_refinement_steps: List[int] = [0, 10, 20],
+        
         scale_factor: int = 20,
-        steps_to_save_attention_maps: Optional[List[int]] = None,
-        do_smoothing: bool = True,
-        smoothing_kernel_size: int = 3,
-        smoothing_sigma: float = 0.5,
-        temperature: float = 0.5,
-        softmax_normalize: bool = True,
-        softmax_normalize_attention_maps: bool = False,
-        add_previous_attention_maps: bool = True,
-        previous_attention_map_anchor_step: Optional[int] = None,
-        loss_fn: str = "ntxent",
+        
         dab = False,
-        loss_mode: str = "tv",
-        thresholds: Optional[dict] = {0: 0.05, 10: 0.5, 20: 0.8},
-        smooth_attentions: bool = True,
-        sigma: float = 0.5,
-        kernel_size: int = 3,
-        sd_2_1: bool = False,
+    
         ratio=None,
         # thresholds: Optional[dict] = None,
         # threshold_indicator: Optional[str] = None,
@@ -1728,35 +1546,7 @@ class PixArtAlphaPipeline(DiffusionPipeline):
         # show_cross_attention(self.tokenizer, prompt, self.attention_store, 64, i, dab)
         return ImagePipelineOutput(images=image)
     
-def default_param(loss_mode):
-    assert loss_mode in ['max', 'tv', 'tv_bind']
-    max_refinement_steps_init_step = 50
-    if loss_mode == 'max':
-        threshold_indicator = 'max_attn'
-        max_refinement_steps_init_step  = 20
-        thresholds = {0: 0.05, 10: 0.5, 20: 0.8}
-    elif loss_mode == 'tv':
-        threshold_indicator = 'tv_loss'
-        max_refinement_steps_init_step = 50
-        thresholds = {0: 0.05, 10: 0.2, 20: 0.3}
-    # elif loss_mode in ['tv_bind']:
-    #     threshold_indicator = 'tv_loss'
-    #     thresholds = {0: 0.005, 10: 0.01, 20: 0.05}  # 'tv_loss'
-    elif loss_mode in ['tv_bind']:
-        threshold_indicator = 'tv_loss'
-        thresholds = {0: 0.003}  # 'tv_loss'
-    elif loss_mode == 'tv_max':
-        threshold_indicator = 'max_attn'
-        thresholds = {0: 0.05, 10: 0.2, 20: 0.3}
-    else:
-        raise NotImplementedError
 
-    parm_dict = {
-        'threshold_indicator': threshold_indicator,
-        'thresholds': thresholds,
-        'max_refinement_steps_init_step': max_refinement_steps_init_step,
-    }
-    return parm_dict
 class GaussianSmoothing(torch.nn.Module):
     """
     Arguments:
